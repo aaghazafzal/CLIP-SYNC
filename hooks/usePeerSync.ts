@@ -55,11 +55,29 @@ export function usePeerSync(): UsePeerSyncReturn {
     try {
       // Dynamic import to prevent SSR issues with WebRTC
       const { joinRoom: joinTrysteroRoom } = await import('@trystero-p2p/torrent');
-
       
       const appId = 'clipsync-zero-setup-v1';
-      // Join the Trystero room (using torrent trackers for signaling)
-      const room = joinTrysteroRoom({ appId }, code.toUpperCase());
+      
+      // Free STUN/TURN servers to bypass strict NAT (like mobile 5G)
+      const rtcConfig = {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:global.stun.twilio.com:3478' },
+          {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+          },
+          {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject',
+          }
+        ]
+      };
+
+      // Join the Trystero room (using torrent trackers for signaling + TURN for connection)
+      const room = joinTrysteroRoom({ appId, rtcConfig }, code.toUpperCase());
       roomRef.current = room;
 
       if (asHost) {
