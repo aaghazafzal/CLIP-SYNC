@@ -6,8 +6,8 @@ import { generateRoomCode } from '@/lib/utils';
 export type SyncStatus =
   | 'idle'
   | 'initializing'
-  | 'waiting'      // host: waiting for joiner
-  | 'connecting'   // joiner: connecting to host
+  | 'waiting'
+  | 'connecting'
   | 'connected'
   | 'disconnected'
   | 'error';
@@ -31,114 +31,151 @@ export function usePeerSync(): UsePeerSyncReturn {
   const [myCode, setMyCode]   = useState('');
   const [isHost, setIsHost]   = useState(false);
 
-  const roomRef = useRef<any>(null);
-  const sendTextFnRef = useRef<any>(null);
+  const peerRef   = useRef<any>(null);
+  const connRef   = useRef<any>(null);
   const isSending = useRef(false);
 
   const cleanup = useCallback(() => {
-    try {
-      if (roomRef.current) {
-        roomRef.current.leave();
-      }
-    } catch (_) {}
-    roomRef.current = null;
-    sendTextFnRef.current = null;
+    try { connRef.current?.close(); } catch (_) {}
+    try { peerRef.current?.destroy(); } catch (_) {}
+    connRef.current = null;
+    peerRef.current = null;
   }, []);
 
-  const setupRoom = useCallback(async (code: string, asHost: boolean) => {
+  /* ── Shared connection handler (same as ShareBridge setupConn) ── */
+  const setupConn = useCallback((c: any) => {
+    connRef.current = c;
+
+    c.on('open', () => {
+      console.log('[ClipSync] conn open');
+      setStatus('connected');
+    });
+
+    c.on('data', (data: unknown) => {
+      // Handle string messages (clipboard text)
+      if (typeof data === 'string') {
+        isSending.current = true;
+        setText(data);
+        setTimeout(() => { isSending.current = false; }, 50);
+      }
+    });
+
+    c.on('close', () => {
+      console.log('[ClipSync] conn closed');
+      setStatus('disconnected');
+      connRef.current = null;
+    });
+
+    c.on('error', (err: Error) => {
+      console.error('[ClipSync] conn error', err);
+      setError(err.message || 'Connection error');
+      setStatus('error');
+    });
+  }, []);
+
+  /* ── HOST: Exact same pattern as ShareBridge startShare() ── */
+  const initAsHost = useCallback(async () => {
     cleanup();
-    setStatus(asHost ? 'initializing' : 'connecting');
+    setStatus('initializing');
     setError('');
-    setIsHost(asHost);
-    setMyCode(code.toUpperCase());
+    setIsHost(true);
+
+    const code = generateRoomCode();
+    setMyCode(code);
 
     try {
-      // Dynamic import to prevent SSR issues with WebRTC
-      const { joinRoom: joinTrysteroRoom } = await import('@trystero-p2p/mqtt');
-      
-      const appId = 'clipsync-zero-setup-v1';
-      
-      // Free STUN/TURN servers to bypass strict NAT (like mobile 5G)
-      const rtcConfig = {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:global.stun.twilio.com:3478' },
-          {
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelayproject',
-            credential: 'openrelayproject',
-          },
-          {
-            urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelayproject',
-            credential: 'openrelayproject',
-          }
-        ]
-      };
+      const { Peer } = await import('peerjs');
 
-      // Join the Trystero room (using torrent trackers for signaling + TURN for connection)
-      const room = joinTrysteroRoom({ appId, rtcConfig }, code.toUpperCase());
-      roomRef.current = room;
+      // ShareBridge uses: new Peer(myCode, { debug: 0 })
+      // Using code directly as peer ID — no prefix, no extra config
+      const peer = new Peer(code, { debug: 0 });
+      peerRef.current = peer;
 
-      if (asHost) {
+      peer.on('open', (id: string) => {
+        console.log('[ClipSync] peer open:', id);
         setStatus('waiting');
-      }
+      });
 
-      room.onPeerJoin = (peerId: string) => {
-        console.log('[ClipSync] 🔗 Peer joined:', peerId);
-        setStatus('connected');
-      };
-
-      room.onPeerLeave = (peerId: string) => {
-        console.log('[ClipSync] ⚠️ Peer left:', peerId);
-        setStatus('disconnected');
-      };
-
-      // Setup actions
-      const action = room.makeAction('clipboard-text');
-      sendTextFnRef.current = action.send;
-
-      action.onMessage = (data: unknown, context: any) => {
-        if (typeof data === 'string') {
-          isSending.current = true;
-          setText(data);
-          setTimeout(() => { isSending.current = false; }, 50);
+      peer.on('error', (err: any) => {
+        console.error('[ClipSync] peer error', err);
+        if (err.type === 'unavailable-id') {
+          // Code taken — regenerate (same as ShareBridge)
+          peer.destroy();
+          peerRef.current = null;
+          setTimeout(() => initAsHost(), 300);
+          return;
         }
+        setError('Connection error: ' + (err.message || 'Unknown'));
+        setStatus('error');
+      });
+
+      peer.on('connection', (dataConn: any) => {
+        console.log('[ClipSync] incoming connection');
+        setupConn(dataConn);
+      });
+
+    } catch (err: any) {
+      setError(err?.message || 'Failed to start');
+      setStatus('error');
+    }
+  }, [cleanup, setupConn]);
+
+  /* ── JOIN: Exact same pattern as ShareBridge doConnect() ── */
+  const joinRoom = useCallback(async (code: string) => {
+    cleanup();
+    setStatus('connecting');
+    setError('');
+    setIsHost(false);
+    const upperCode = code.toUpperCase();
+    setMyCode(upperCode);
+
+    try {
+      const { Peer } = await import('peerjs');
+
+      // ShareBridge uses: new Peer({ debug: 0 }) — no ID, let PeerJS assign one
+      const peer = new Peer({ debug: 0 } as any);
+      peerRef.current = peer;
+
+      peer.on('error', (e: any) => {
+        console.error('[ClipSync] peer error', e);
+        setError('Peer error: ' + (e.message || 'Unknown'));
+        setStatus('error');
+      });
+
+      const attempt = () => {
+        console.log('[ClipSync] attempting to connect to:', upperCode);
+        // ShareBridge uses: peer.connect(code, { reliable:true, serialization:'binary' })
+        const c = peer.connect(upperCode, { reliable: true, serialization: 'binary' });
+        setupConn(c);
+
+        // Timeout
+        setTimeout(() => {
+          if (connRef.current && !connRef.current.open) {
+            setError('Could not reach the host. Check the code and try again.');
+            setStatus('error');
+          }
+        }, 15000);
       };
 
-      // Timeout for joiner if no one is in the room after 25s
-      if (!asHost) {
-        setTimeout(() => {
-          if (room.getPeers && Object.keys(room.getPeers()).length === 0) {
-            setError('Could not reach the host. Make sure the code is correct and the other device still has the page open.');
-            setStatus('error');
-            cleanup();
-          }
-        }, 25_000);
+      // Same as ShareBridge: if peer already has ID, attempt immediately, otherwise wait
+      if (peer.id) {
+        attempt();
+      } else {
+        peer.on('open', attempt);
       }
 
     } catch (err: any) {
-      console.error('[ClipSync] Error:', err);
-      setError(err?.message || 'Failed to connect');
+      setError(err?.message || 'Failed to join');
       setStatus('error');
     }
-  }, [cleanup]);
-
-  const initAsHost = useCallback(async () => {
-    const code = generateRoomCode();
-    await setupRoom(code, true);
-  }, [setupRoom]);
-
-  const joinRoom = useCallback(async (code: string) => {
-    await setupRoom(code, false);
-  }, [setupRoom]);
+  }, [cleanup, setupConn]);
 
   const sendText = useCallback((newText: string) => {
     setText(newText);
-    if (sendTextFnRef.current && status === 'connected' && !isSending.current) {
-      sendTextFnRef.current(newText);
+    if (connRef.current?.open && !isSending.current) {
+      connRef.current.send(newText);
     }
-  }, [status]);
+  }, []);
 
   const disconnect = useCallback(() => {
     cleanup();
