@@ -24,6 +24,15 @@ interface UsePeerSyncReturn {
   isHost: boolean;
 }
 
+// ── Relay server URL ─────────────────────────────────────
+// In production: your Render.com deployed URL
+// In development: local server
+const RELAY_URL =
+  process.env.NEXT_PUBLIC_RELAY_URL ||
+  (typeof window !== 'undefined' && window.location.hostname === 'localhost'
+    ? 'ws://localhost:8080'
+    : 'wss://clipsync-relay.onrender.com');
+
 export function usePeerSync(): UsePeerSyncReturn {
   const [text, setText]       = useState('');
   const [status, setStatus]   = useState<SyncStatus>('idle');
@@ -31,149 +40,113 @@ export function usePeerSync(): UsePeerSyncReturn {
   const [myCode, setMyCode]   = useState('');
   const [isHost, setIsHost]   = useState(false);
 
-  const peerRef   = useRef<any>(null);
-  const connRef   = useRef<any>(null);
-  const isSending = useRef(false);
+  const wsRef      = useRef<WebSocket | null>(null);
+  const isSending  = useRef(false);
+  const keepAlive  = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const cleanup = useCallback(() => {
-    try { connRef.current?.close(); } catch (_) {}
-    try { peerRef.current?.destroy(); } catch (_) {}
-    connRef.current = null;
-    peerRef.current = null;
-  }, []);
-
-  /* ── Shared connection handler (same as ShareBridge setupConn) ── */
-  const setupConn = useCallback((c: any) => {
-    connRef.current = c;
-
-    c.on('open', () => {
-      console.log('[ClipSync] conn open');
-      setStatus('connected');
-    });
-
-    c.on('data', (data: unknown) => {
-      // Handle string messages (clipboard text)
-      if (typeof data === 'string') {
-        isSending.current = true;
-        setText(data);
-        setTimeout(() => { isSending.current = false; }, 50);
-      }
-    });
-
-    c.on('close', () => {
-      console.log('[ClipSync] conn closed');
-      setStatus('disconnected');
-      connRef.current = null;
-    });
-
-    c.on('error', (err: Error) => {
-      console.error('[ClipSync] conn error', err);
-      setError(err.message || 'Connection error');
-      setStatus('error');
-    });
-  }, []);
-
-  /* ── HOST: Exact same pattern as ShareBridge startShare() ── */
-  const initAsHost = useCallback(async () => {
-    cleanup();
-    setStatus('initializing');
-    setError('');
-    setIsHost(true);
-
-    const code = generateRoomCode();
-    setMyCode(code);
-
-    try {
-      const { Peer } = await import('peerjs');
-
-      // ShareBridge uses: new Peer(myCode, { debug: 0 })
-      // Using code directly as peer ID — no prefix, no extra config
-      const peer = new Peer(code, { debug: 0 });
-      peerRef.current = peer;
-
-      peer.on('open', (id: string) => {
-        console.log('[ClipSync] peer open:', id);
-        setStatus('waiting');
-      });
-
-      peer.on('error', (err: any) => {
-        console.error('[ClipSync] peer error', err);
-        if (err.type === 'unavailable-id') {
-          // Code taken — regenerate (same as ShareBridge)
-          peer.destroy();
-          peerRef.current = null;
-          setTimeout(() => initAsHost(), 300);
-          return;
-        }
-        setError('Connection error: ' + (err.message || 'Unknown'));
-        setStatus('error');
-      });
-
-      peer.on('connection', (dataConn: any) => {
-        console.log('[ClipSync] incoming connection');
-        setupConn(dataConn);
-      });
-
-    } catch (err: any) {
-      setError(err?.message || 'Failed to start');
-      setStatus('error');
+    if (keepAlive.current) {
+      clearInterval(keepAlive.current);
+      keepAlive.current = null;
     }
-  }, [cleanup, setupConn]);
+    if (wsRef.current) {
+      try { wsRef.current.close(1000); } catch (_) {}
+      wsRef.current = null;
+    }
+  }, []);
 
-  /* ── JOIN: Exact same pattern as ShareBridge doConnect() ── */
-  const joinRoom = useCallback(async (code: string) => {
+  /* ── Connect to relay server and join a room ── */
+  const connectToRelay = useCallback((code: string, asHost: boolean) => {
     cleanup();
-    setStatus('connecting');
+    setStatus(asHost ? 'initializing' : 'connecting');
     setError('');
-    setIsHost(false);
-    const upperCode = code.toUpperCase();
-    setMyCode(upperCode);
+    setIsHost(asHost);
+    setMyCode(code.toUpperCase());
 
-    try {
-      const { Peer } = await import('peerjs');
+    const ws = new WebSocket(RELAY_URL);
+    wsRef.current = ws;
 
-      // ShareBridge uses: new Peer({ debug: 0 }) — no ID, let PeerJS assign one
-      const peer = new Peer({ debug: 0 } as any);
-      peerRef.current = peer;
+    ws.onopen = () => {
+      console.log('[ClipSync] WebSocket connected to relay');
+      // Join the room
+      ws.send(JSON.stringify({ type: 'join', code: code.toUpperCase() }));
+    };
 
-      peer.on('error', (e: any) => {
-        console.error('[ClipSync] peer error', e);
-        setError('Peer error: ' + (e.message || 'Unknown'));
-        setStatus('error');
-      });
+    ws.onmessage = (event) => {
+      let msg;
+      try { msg = JSON.parse(event.data); } catch (_) { return; }
 
-      const attempt = () => {
-        console.log('[ClipSync] attempting to connect to:', upperCode);
-        // ShareBridge uses: peer.connect(code, { reliable:true, serialization:'binary' })
-        const c = peer.connect(upperCode, { reliable: true, serialization: 'binary' });
-        setupConn(c);
-
-        // Timeout
-        setTimeout(() => {
-          if (connRef.current && !connRef.current.open) {
-            setError('Could not reach the host. Check the code and try again.');
-            setStatus('error');
+      switch (msg.type) {
+        case 'joined':
+          console.log(`[ClipSync] Joined room ${msg.code}, ${msg.peers} peer(s)`);
+          if (asHost) {
+            setStatus(msg.peers > 1 ? 'connected' : 'waiting');
+          } else {
+            setStatus(msg.peers > 1 ? 'connected' : 'connecting');
           }
-        }, 15000);
-      };
+          break;
 
-      // Same as ShareBridge: if peer already has ID, attempt immediately, otherwise wait
-      if (peer.id) {
-        attempt();
-      } else {
-        peer.on('open', attempt);
+        case 'peer-count':
+          console.log(`[ClipSync] Peer count update: ${msg.peers}`);
+          if (msg.peers >= 2) {
+            setStatus('connected');
+          } else if (msg.peers <= 1) {
+            // Other device left
+            if (status === 'connected') {
+              setStatus('disconnected');
+            } else if (asHost) {
+              setStatus('waiting');
+            }
+          }
+          break;
+
+        case 'text':
+          // Received clipboard text from other device
+          isSending.current = true;
+          setText(msg.text || '');
+          setTimeout(() => { isSending.current = false; }, 50);
+          break;
+
+        case 'pong':
+          // Keepalive response, ignore
+          break;
       }
+    };
 
-    } catch (err: any) {
-      setError(err?.message || 'Failed to join');
+    ws.onerror = (err) => {
+      console.error('[ClipSync] WebSocket error:', err);
+      setError('Connection error. Please try again.');
       setStatus('error');
-    }
-  }, [cleanup, setupConn]);
+    };
+
+    ws.onclose = (event) => {
+      console.log('[ClipSync] WebSocket closed:', event.code, event.reason);
+      if (status !== 'error' && status !== 'idle') {
+        setStatus('disconnected');
+      }
+    };
+
+    // Keepalive ping every 25s (Render.com closes idle connections after 60s)
+    keepAlive.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 25000);
+  }, [cleanup, status]);
+
+  const initAsHost = useCallback(async () => {
+    const code = generateRoomCode();
+    connectToRelay(code, true);
+  }, [connectToRelay]);
+
+  const joinRoom = useCallback(async (code: string) => {
+    connectToRelay(code, false);
+  }, [connectToRelay]);
 
   const sendText = useCallback((newText: string) => {
     setText(newText);
-    if (connRef.current?.open && !isSending.current) {
-      connRef.current.send(newText);
+    if (wsRef.current?.readyState === WebSocket.OPEN && !isSending.current) {
+      wsRef.current.send(JSON.stringify({ type: 'text', text: newText }));
     }
   }, []);
 

@@ -1,0 +1,16 @@
+{
+  "name": "clipsync-relay",
+  "version": "1.0.0",
+  "description": "Lightweight WebSocket relay server for ClipSync clipboard sync",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
