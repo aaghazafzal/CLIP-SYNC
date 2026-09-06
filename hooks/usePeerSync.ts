@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { generateRoomCode } from '@/lib/utils';
+import Peer, { DataConnection } from 'peerjs';
 
 export type SyncStatus =
   | 'idle'
@@ -12,9 +13,22 @@ export type SyncStatus =
   | 'disconnected'
   | 'error';
 
+export type FeedItem = {
+  id: string;
+  type: 'text' | 'image' | 'file';
+  content?: string;
+  fileName?: string;
+  fileSize?: number;
+  fileUrl?: string;
+  mimeType?: string;
+  sender: 'me' | 'other';
+  timestamp: number;
+};
+
 interface UsePeerSyncReturn {
-  text: string;
+  feed: FeedItem[];
   sendText: (t: string) => void;
+  sendFile: (file: File) => Promise<void>;
   status: SyncStatus;
   errorMsg: string;
   myCode: string;
@@ -22,34 +36,40 @@ interface UsePeerSyncReturn {
   joinRoom: (code: string) => Promise<void>;
   disconnect: () => void;
   isHost: boolean;
+  autoSync: boolean;
+  setAutoSync: (val: boolean) => void;
 }
 
-// ── Relay server URL ─────────────────────────────────────
-// In production: your Render.com deployed URL
-// In development: local server
-let RELAY_URL =
+const RELAY_URL =
   process.env.NEXT_PUBLIC_RELAY_URL ||
   (typeof window !== 'undefined' && window.location.hostname === 'localhost'
     ? 'ws://localhost:8080'
     : 'wss://clipsync-relay-wthr.onrender.com');
 
-// Ensure the protocol is ws or wss, not http or https
-if (RELAY_URL.startsWith('http://')) {
-  RELAY_URL = RELAY_URL.replace('http://', 'ws://');
-} else if (RELAY_URL.startsWith('https://')) {
-  RELAY_URL = RELAY_URL.replace('https://', 'wss://');
-}
-
 export function usePeerSync(): UsePeerSyncReturn {
-  const [text, setText]       = useState('');
-  const [status, setStatus]   = useState<SyncStatus>('idle');
-  const [errorMsg, setError]  = useState('');
-  const [myCode, setMyCode]   = useState('');
-  const [isHost, setIsHost]   = useState(false);
+  const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [status, setStatus] = useState<SyncStatus>('idle');
+  const [errorMsg, setError] = useState('');
+  const [myCode, setMyCode] = useState('');
+  const [isHost, setIsHost] = useState(false);
+  const [autoSync, setAutoSyncState] = useState(false);
 
-  const wsRef      = useRef<WebSocket | null>(null);
-  const isSending  = useRef(false);
-  const keepAlive  = useRef<ReturnType<typeof setInterval> | null>(null);
+  // References for connections
+  const wsRef = useRef<WebSocket | null>(null);
+  const peerRef = useRef<Peer | null>(null);
+  const connRef = useRef<DataConnection | null>(null);
+  const keepAlive = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load auto-sync preference on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('clipsync_auto_sync');
+    if (saved === 'true') setAutoSyncState(true);
+  }, []);
+
+  const setAutoSync = useCallback((val: boolean) => {
+    setAutoSyncState(val);
+    localStorage.setItem('clipsync_auto_sync', String(val));
+  }, []);
 
   const cleanup = useCallback(() => {
     if (keepAlive.current) {
@@ -60,111 +80,250 @@ export function usePeerSync(): UsePeerSyncReturn {
       try { wsRef.current.close(1000); } catch (_) {}
       wsRef.current = null;
     }
+    if (connRef.current) {
+      try { connRef.current.close(); } catch (_) {}
+      connRef.current = null;
+    }
+    if (peerRef.current) {
+      try { peerRef.current.destroy(); } catch (_) {}
+      peerRef.current = null;
+    }
   }, []);
 
-  /* ── Connect to relay server and join a room ── */
-  const connectToRelay = useCallback((code: string, asHost: boolean) => {
+  const addFeedItem = useCallback((item: Omit<FeedItem, 'id' | 'timestamp'>) => {
+    const newItem: FeedItem = {
+      ...item,
+      id: Math.random().toString(36).substring(2, 9),
+      timestamp: Date.now(),
+    };
+    setFeed((prev) => [newItem, ...prev]);
+    return newItem;
+  }, []);
+
+  // ── Connection Logic (WebSocket + PeerJS) ──
+  const connectToRoom = useCallback((code: string, asHost: boolean) => {
     cleanup();
     setStatus(asHost ? 'initializing' : 'connecting');
     setError('');
     setIsHost(asHost);
     setMyCode(code.toUpperCase());
 
-    const ws = new WebSocket(RELAY_URL);
+    // 1. WebSocket for Text and Presence
+    let wsUrl = RELAY_URL;
+    if (wsUrl.startsWith('http://')) wsUrl = wsUrl.replace('http://', 'ws://');
+    if (wsUrl.startsWith('https://')) wsUrl = wsUrl.replace('https://', 'wss://');
+
+    const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      console.log('[ClipSync] WebSocket connected to relay');
-      // Join the room
       ws.send(JSON.stringify({ type: 'join', code: code.toUpperCase() }));
     };
 
-    ws.onmessage = (event) => {
+    ws.onmessage = async (event) => {
       let msg;
       try { msg = JSON.parse(event.data); } catch (_) { return; }
 
       switch (msg.type) {
         case 'joined':
-          console.log(`[ClipSync] Joined room ${msg.code}, ${msg.peers} peer(s)`);
-          if (asHost) {
-            setStatus(msg.peers > 1 ? 'connected' : 'waiting');
-          } else {
-            setStatus(msg.peers > 1 ? 'connected' : 'connecting');
-          }
+          if (asHost) setStatus(msg.peers > 1 ? 'connected' : 'waiting');
+          else setStatus(msg.peers > 1 ? 'connected' : 'connecting');
           break;
-
         case 'peer-count':
-          console.log(`[ClipSync] Peer count update: ${msg.peers}`);
-          if (msg.peers >= 2) {
-            setStatus('connected');
-          } else if (msg.peers <= 1) {
-            // Other device left
-            if (status === 'connected') {
-              setStatus('disconnected');
-            } else if (asHost) {
-              setStatus('waiting');
+          if (msg.peers >= 2) setStatus('connected');
+          else if (msg.peers <= 1 && status === 'connected') setStatus('disconnected');
+          else if (asHost && msg.peers <= 1) setStatus('waiting');
+          break;
+        case 'text':
+          addFeedItem({ type: 'text', content: msg.text, sender: 'other' });
+          // Auto-write to clipboard if enabled
+          if (autoSync && document.hasFocus()) {
+            try {
+              await navigator.clipboard.writeText(msg.text);
+              console.log('[AutoSync] Copied to clipboard!');
+            } catch (err) {
+              console.error('[AutoSync] Write failed', err);
             }
           }
           break;
-
-        case 'text':
-          // Received clipboard text from other device
-          isSending.current = true;
-          setText(msg.text || '');
-          setTimeout(() => { isSending.current = false; }, 50);
-          break;
-
-        case 'pong':
-          // Keepalive response, ignore
-          break;
       }
     };
 
-    ws.onerror = (err) => {
-      console.error('[ClipSync] WebSocket error:', err);
-      setError('Connection error. Please try again.');
+    ws.onerror = () => {
+      setError('Relay Connection error.');
       setStatus('error');
     };
 
-    ws.onclose = (event) => {
-      console.log('[ClipSync] WebSocket closed:', event.code, event.reason);
-      if (status !== 'error' && status !== 'idle') {
-        setStatus('disconnected');
-      }
+    ws.onclose = () => {
+      if (status !== 'error' && status !== 'idle') setStatus('disconnected');
     };
 
-    // Keepalive ping every 25s (Render.com closes idle connections after 60s)
     keepAlive.current = setInterval(() => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'ping' }));
-      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
     }, 25000);
-  }, [cleanup, status]);
+
+    // 2. PeerJS for File/Image Data Channels (Background)
+    const peer = new Peer(asHost ? code.toUpperCase() : '', {
+      debug: 1,
+    });
+    peerRef.current = peer;
+
+    peer.on('open', () => {
+      if (!asHost) {
+        // Joiner connects to host
+        const conn = peer.connect(code.toUpperCase(), { reliable: true, serialization: 'binary' });
+        setupPeerConnection(conn);
+      }
+    });
+
+    peer.on('connection', (conn) => {
+      if (asHost) {
+        setupPeerConnection(conn);
+      }
+    });
+
+    peer.on('error', (err) => {
+      console.warn('[PeerJS] Background connection error (Files might not work):', err);
+    });
+
+  }, [cleanup, status, addFeedItem, autoSync]);
+
+  const setupPeerConnection = (conn: DataConnection) => {
+    connRef.current = conn;
+    conn.on('open', () => {
+      console.log('[PeerJS] Data channel ready for files!');
+    });
+
+    conn.on('data', (data: any) => {
+      if (data && data.type === 'file') {
+        const blob = new Blob([data.fileData], { type: data.mimeType });
+        const fileUrl = URL.createObjectURL(blob);
+        addFeedItem({
+          type: data.mimeType.startsWith('image/') ? 'image' : 'file',
+          fileName: data.fileName,
+          fileSize: data.fileSize,
+          mimeType: data.mimeType,
+          fileUrl,
+          sender: 'other'
+        });
+      }
+    });
+  };
 
   const initAsHost = useCallback(async () => {
     const code = generateRoomCode();
-    connectToRelay(code, true);
-  }, [connectToRelay]);
+    connectToRoom(code, true);
+  }, [connectToRoom]);
 
   const joinRoom = useCallback(async (code: string) => {
-    connectToRelay(code, false);
-  }, [connectToRelay]);
+    connectToRoom(code, false);
+  }, [connectToRoom]);
 
-  const sendText = useCallback((newText: string) => {
-    setText(newText);
-    if (wsRef.current?.readyState === WebSocket.OPEN && !isSending.current) {
-      wsRef.current.send(JSON.stringify({ type: 'text', text: newText }));
+  const sendText = useCallback((text: string) => {
+    addFeedItem({ type: 'text', content: text, sender: 'me' });
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'text', text }));
     }
-  }, []);
+  }, [addFeedItem]);
+
+  const sendFile = useCallback(async (file: File) => {
+    const arrayBuffer = await file.arrayBuffer();
+    const isImage = file.type.startsWith('image/');
+    
+    // Create local preview immediately
+    const localBlob = new Blob([arrayBuffer], { type: file.type });
+    const fileUrl = URL.createObjectURL(localBlob);
+    
+    addFeedItem({
+      type: isImage ? 'image' : 'file',
+      fileName: file.name,
+      fileSize: file.size,
+      mimeType: file.type,
+      fileUrl,
+      sender: 'me'
+    });
+
+    if (connRef.current && connRef.current.open) {
+      connRef.current.send({
+        type: 'file',
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        fileData: arrayBuffer
+      });
+    } else {
+      console.warn('[PeerJS] Cannot send file, data channel not open');
+      // Could show a toast error here
+    }
+  }, [addFeedItem]);
 
   const disconnect = useCallback(() => {
     cleanup();
     setStatus('disconnected');
-    setText('');
+    setFeed([]);
     setMyCode('');
   }, [cleanup]);
 
+  // Handle Auto-Sync Clipboard Read on Focus
+  useEffect(() => {
+    const handleFocus = async () => {
+      if (status !== 'connected' || !autoSync) return;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) {
+          // Avoid sending the same text repeatedly if it hasn't changed
+          // We can check the latest text sent
+          setFeed(prev => {
+            const lastMyText = prev.find(p => p.sender === 'me' && p.type === 'text');
+            if (lastMyText?.content !== text) {
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'text', text }));
+                
+                // Return updated feed synchronously within setState
+                return [{
+                  id: Math.random().toString(36).substring(2, 9),
+                  type: 'text',
+                  content: text,
+                  sender: 'me',
+                  timestamp: Date.now()
+                }, ...prev];
+              }
+            }
+            return prev;
+          });
+        }
+      } catch (err) {
+        console.log('[AutoSync] Cannot read clipboard automatically');
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
+  }, [status, autoSync]);
+
+  // Handle Global Ctrl+V (Paste) for both Text and Images
+  useEffect(() => {
+    const handlePaste = async (e: ClipboardEvent) => {
+      if (status !== 'connected') return;
+      
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          const file = items[i].getAsFile();
+          if (file) await sendFile(file);
+          e.preventDefault();
+          break;
+        }
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [status, sendFile]);
+
   useEffect(() => () => cleanup(), [cleanup]);
 
-  return { text, sendText, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost };
+  return { feed, sendText, sendFile, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost, autoSync: autoSync, setAutoSync };
 }

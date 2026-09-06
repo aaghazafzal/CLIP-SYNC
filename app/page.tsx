@@ -62,7 +62,7 @@ function BackButton({ onClick }: { onClick: () => void }) {
 export default function Home() {
   const [mode, setMode] = useState<Mode>('choose');
   const [autoJoinCode, setAutoJoinCode] = useState<string | null>(null);
-  const { text, sendText, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost } = usePeerSync();
+  const { feed, sendText, sendFile, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost, autoSync, setAutoSync } = usePeerSync();
 
   // Check URL for ?room=XXXX on load
   useEffect(() => {
@@ -115,11 +115,14 @@ export default function Home() {
               }}
             >
               <SyncView
-                text={text}
-                onTextChange={sendText}
+                feed={feed}
+                onSendText={sendText}
+                onSendFile={sendFile}
                 code={myCode}
                 isHost={isHost}
                 onDisconnect={handleDisconnect}
+                autoSync={autoSync}
+                setAutoSync={setAutoSync}
               />
             </div>
           </div>
