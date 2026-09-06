@@ -25,8 +25,17 @@ export type FeedItem = {
   timestamp: number;
 };
 
+export type TransferProgress = {
+  fileId: string;
+  fileName: string;
+  totalSize: number;
+  transferred: number;
+  type: 'upload' | 'download';
+};
+
 interface UsePeerSyncReturn {
   feed: FeedItem[];
+  transfers: Record<string, TransferProgress>;
   sendText: (t: string) => void;
   sendFile: (file: File) => Promise<void>;
   status: SyncStatus;
@@ -48,6 +57,7 @@ const RELAY_URL =
 
 export function usePeerSync(): UsePeerSyncReturn {
   const [feed, setFeed] = useState<FeedItem[]>([]);
+  const [transfers, setTransfers] = useState<Record<string, TransferProgress>>({});
   const [status, setStatus] = useState<SyncStatus>('idle');
   const [errorMsg, setError] = useState('');
   const [myCode, setMyCode] = useState('');
@@ -108,7 +118,6 @@ export function usePeerSync(): UsePeerSyncReturn {
     setIsHost(asHost);
     setMyCode(code.toUpperCase());
 
-    // 1. WebSocket for Text and Presence
     let wsUrl = RELAY_URL;
     if (wsUrl.startsWith('http://')) wsUrl = wsUrl.replace('http://', 'ws://');
     if (wsUrl.startsWith('https://')) wsUrl = wsUrl.replace('https://', 'wss://');
@@ -136,7 +145,6 @@ export function usePeerSync(): UsePeerSyncReturn {
           break;
         case 'text':
           addFeedItem({ type: 'text', content: msg.text, sender: 'other' });
-          // Auto-write to clipboard if enabled
           if (autoSync && document.hasFocus()) {
             try {
               await navigator.clipboard.writeText(msg.text);
@@ -169,8 +177,8 @@ export function usePeerSync(): UsePeerSyncReturn {
 
     peer.on('open', () => {
       if (!asHost) {
-        // Joiner connects to host - use default JSON serialization for reliability
-        const conn = peer.connect(code.toUpperCase(), { reliable: true });
+        // Use serialization: none to enable raw WebRTC ArrayBuffer sending
+        const conn = peer.connect(code.toUpperCase(), { reliable: true, serialization: 'none' });
         setupPeerConnection(conn);
       }
     });
@@ -187,14 +195,7 @@ export function usePeerSync(): UsePeerSyncReturn {
 
   }, [cleanup, status, addFeedItem, autoSync]);
 
-  const fileChunksRef = useRef<Record<string, {
-    fileName: string;
-    fileSize: number;
-    mimeType: string;
-    totalChunks: number;
-    chunks: string[];
-    receivedChunks: number;
-  }>>({});
+  const activeRxMeta = useRef<{ fileId: string; fileName: string; mimeType: string; fileSize: number; received: number; bufs: ArrayBuffer[] } | null>(null);
 
   const setupPeerConnection = (conn: DataConnection) => {
     connRef.current = conn;
@@ -203,38 +204,68 @@ export function usePeerSync(): UsePeerSyncReturn {
     });
 
     conn.on('data', (data: any) => {
-      if (data && data.type === 'file-start') {
-        fileChunksRef.current[data.fileId] = {
-          fileName: data.fileName,
-          fileSize: data.fileSize,
-          mimeType: data.mimeType,
-          totalChunks: data.totalChunks,
-          chunks: new Array(data.totalChunks),
-          receivedChunks: 0
-        };
-      } else if (data && data.type === 'file-chunk') {
-        const fileInfo = fileChunksRef.current[data.fileId];
-        if (fileInfo) {
-          fileInfo.chunks[data.chunkIndex] = data.data;
-          fileInfo.receivedChunks++;
-          
-          if (fileInfo.receivedChunks === fileInfo.totalChunks) {
-            // Reconstruct file!
-            const fullDataUrl = fileInfo.chunks.join('');
-            
+      if (typeof data === 'string') {
+        let msg;
+        try { msg = JSON.parse(data); } catch (_) { return; }
+        
+        if (msg.type === 'file-start') {
+          activeRxMeta.current = {
+            fileId: msg.fileId,
+            fileName: msg.fileName,
+            fileSize: msg.fileSize,
+            mimeType: msg.mimeType,
+            received: 0,
+            bufs: []
+          };
+          setTransfers(prev => ({
+            ...prev,
+            [msg.fileId]: { fileId: msg.fileId, fileName: msg.fileName, totalSize: msg.fileSize, transferred: 0, type: 'download' }
+          }));
+        } else if (msg.type === 'file-done') {
+          const rx = activeRxMeta.current;
+          if (rx) {
+            const blob = new Blob(rx.bufs, { type: rx.mimeType || 'application/octet-stream' });
+            const fileUrl = URL.createObjectURL(blob);
             addFeedItem({
-              type: fileInfo.mimeType.startsWith('image/') ? 'image' : 'file',
-              fileName: fileInfo.fileName,
-              fileSize: fileInfo.fileSize,
-              mimeType: fileInfo.mimeType,
-              fileUrl: fullDataUrl,
+              type: rx.mimeType.startsWith('image/') ? 'image' : 'file',
+              fileName: rx.fileName,
+              fileSize: rx.fileSize,
+              mimeType: rx.mimeType,
+              fileUrl,
               sender: 'other'
             });
-            
-            delete fileChunksRef.current[data.fileId];
+            setTransfers(prev => {
+              const next = { ...prev };
+              delete next[rx.fileId];
+              return next;
+            });
+            activeRxMeta.current = null;
           }
         }
+      } else if (data instanceof ArrayBuffer) {
+        const rx = activeRxMeta.current;
+        if (rx) {
+          rx.bufs.push(data);
+          rx.received += data.byteLength;
+          
+          setTransfers(prev => ({
+            ...prev,
+            [rx.fileId]: { ...prev[rx.fileId], transferred: rx.received }
+          }));
+        }
       }
+    });
+  };
+
+  const drainBuffer = (c: DataConnection) => {
+    return new Promise<void>(res => {
+      const CHUNK = 64000;
+      const chk = () => {
+        // @ts-ignore - PeerJS exposes dataChannel internally
+        if (c.dataChannel && c.dataChannel.bufferedAmount > CHUNK * 6) setTimeout(chk, 40);
+        else res();
+      };
+      chk();
     });
   };
 
@@ -255,10 +286,50 @@ export function usePeerSync(): UsePeerSyncReturn {
   }, [addFeedItem]);
 
   const sendFile = useCallback(async (file: File) => {
+    if (!connRef.current || !connRef.current.open) {
+      console.warn('[PeerJS] Cannot send file, data channel not open');
+      return;
+    }
+
+    const fileId = Math.random().toString(36).substring(2, 9);
+    setTransfers(prev => ({
+      ...prev,
+      [fileId]: { fileId, fileName: file.name, totalSize: file.size, transferred: 0, type: 'upload' }
+    }));
+
+    connRef.current.send(JSON.stringify({
+      type: 'file-start',
+      fileId,
+      fileName: file.name,
+      fileSize: file.size,
+      mimeType: file.type
+    }));
+
+    const CHUNK = 64000;
+    const chunksCount = Math.ceil(file.size / CHUNK);
+    let fileSent = 0;
+
+    for (let n = 0; n < chunksCount; n++) {
+      const start = n * CHUNK;
+      const end = Math.min(start + CHUNK, file.size);
+      const buf = await file.slice(start, end).arrayBuffer();
+
+      await drainBuffer(connRef.current);
+      connRef.current.send(buf);
+
+      fileSent += (end - start);
+      setTransfers(prev => ({
+        ...prev,
+        [fileId]: { ...prev[fileId], transferred: fileSent }
+      }));
+    }
+
+    connRef.current.send(JSON.stringify({ type: 'file-done' }));
+
+    // Create local preview immediately for sender
     const isImage = file.type.startsWith('image/');
-    
-    // Create local preview immediately
-    const fileUrl = URL.createObjectURL(file);
+    const localBlob = new Blob([await file.arrayBuffer()], { type: file.type });
+    const fileUrl = URL.createObjectURL(localBlob);
     
     addFeedItem({
       type: isImage ? 'image' : 'file',
@@ -269,48 +340,15 @@ export function usePeerSync(): UsePeerSyncReturn {
       sender: 'me'
     });
 
-    if (connRef.current && connRef.current.open) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const base64data = reader.result as string;
-        
-        // Chunk the base64 string
-        const CHUNK_SIZE = 64000; // 64KB per chunk
-        const totalChunks = Math.ceil(base64data.length / CHUNK_SIZE);
-        const fileId = Math.random().toString(36).substring(2, 9);
-        
-        connRef.current!.send({
-          type: 'file-start',
-          fileId,
-          fileName: file.name,
-          fileSize: file.size,
-          mimeType: file.type,
-          totalChunks
-        });
+    // Cleanup transfer state
+    setTimeout(() => {
+      setTransfers(prev => {
+        const next = { ...prev };
+        delete next[fileId];
+        return next;
+      });
+    }, 500);
 
-        let currentChunk = 0;
-        
-        // Send chunks with a small delay to prevent buffer overflow
-        const sendInterval = setInterval(() => {
-          if (currentChunk >= totalChunks) {
-            clearInterval(sendInterval);
-            return;
-          }
-          const chunkData = base64data.slice(currentChunk * CHUNK_SIZE, (currentChunk + 1) * CHUNK_SIZE);
-          connRef.current!.send({
-            type: 'file-chunk',
-            fileId,
-            chunkIndex: currentChunk,
-            data: chunkData
-          });
-          currentChunk++;
-        }, 15); // 15ms delay ~ 4.2MB/s, very safe for WebRTC
-      };
-      reader.readAsDataURL(file);
-    } else {
-      console.warn('[PeerJS] Cannot send file, data channel not open');
-      // Could show a toast error here
-    }
   }, [addFeedItem]);
 
   const disconnect = useCallback(() => {
@@ -381,5 +419,5 @@ export function usePeerSync(): UsePeerSyncReturn {
 
   useEffect(() => () => cleanup(), [cleanup]);
 
-  return { feed, sendText, sendFile, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost, autoSync: autoSync, setAutoSync };
+  return { feed, transfers, sendText, sendFile, status, errorMsg, myCode, initAsHost, joinRoom, disconnect, isHost, autoSync: autoSync, setAutoSync };
 }

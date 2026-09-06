@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
-import { FeedItem } from '@/hooks/usePeerSync';
+import { FeedItem, TransferProgress } from '@/hooks/usePeerSync';
 
 interface SyncViewProps {
   feed: FeedItem[];
+  transfers: Record<string, TransferProgress>;
   onSendText: (t: string) => void;
   onSendFile: (file: File) => Promise<void>;
   code: string;
@@ -14,7 +15,7 @@ interface SyncViewProps {
   setAutoSync: (val: boolean) => void;
 }
 
-export function SyncView({ feed, onSendText, onSendFile, code, isHost, onDisconnect, autoSync, setAutoSync }: SyncViewProps) {
+export function SyncView({ feed, transfers, onSendText, onSendFile, code, isHost, onDisconnect, autoSync, setAutoSync }: SyncViewProps) {
   const [inputText, setInputText] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const feedEndRef = useRef<HTMLDivElement>(null);
@@ -50,6 +51,8 @@ export function SyncView({ feed, onSendText, onSendFile, code, isHost, onDisconn
       e.target.value = ''; // Reset
     }
   };
+
+  const activeTransfers = Object.values(transfers);
 
   return (
     <div className="fade-in w-full flex flex-col h-[70vh] md:h-[600px] max-h-[800px]">
@@ -89,7 +92,35 @@ export function SyncView({ feed, onSendText, onSendFile, code, isHost, onDisconn
       <div className="flex-1 overflow-y-auto pr-2 pb-4 flex flex-col-reverse" style={{ scrollbarWidth: 'thin' }}>
         <div ref={feedEndRef} />
         
-        {feed.length === 0 ? (
+        {/* Active Transfers Progress */}
+        {activeTransfers.length > 0 && (
+          <div className="flex flex-col gap-2 mb-4">
+            {activeTransfers.map(tr => {
+              const pct = tr.totalSize > 0 ? Math.round((tr.transferred / tr.totalSize) * 100) : 0;
+              return (
+                <div key={tr.fileId} className="w-full p-3 rounded-xl shadow-sm border" style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}>
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="text-xs font-semibold truncate flex-1 mr-2">{tr.fileName}</span>
+                    <span className="text-xs font-mono" style={{ color: 'var(--accent)' }}>
+                      {tr.type === 'upload' ? 'Sending' : 'Receiving'}... {pct}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-gray-200 dark:bg-gray-800 rounded-full h-1.5 overflow-hidden">
+                    <div 
+                      className="h-full transition-all duration-150 ease-out" 
+                      style={{ width: `${pct}%`, background: 'var(--accent)' }}
+                    />
+                  </div>
+                  <div className="flex justify-between mt-1">
+                    <span className="text-[10px] text-gray-500">{formatFileSize(tr.transferred)} / {formatFileSize(tr.totalSize)}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        
+        {feed.length === 0 && activeTransfers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-3 opacity-50">
             <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--text-muted)' }}>
               <path d="M14 2H6a2 2 0 0 0-2 2v16c0 1.1.9 2 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>
