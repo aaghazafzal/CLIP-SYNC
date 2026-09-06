@@ -31,7 +31,7 @@ let RELAY_URL =
   process.env.NEXT_PUBLIC_RELAY_URL ||
   (typeof window !== 'undefined' && window.location.hostname === 'localhost'
     ? 'ws://localhost:8080'
-    : 'wss://clipsync-relay.onrender.com');
+    : 'wss://clipsync-relay-wthr.onrender.com');
 
 // Ensure the protocol is ws or wss, not http or https
 if (RELAY_URL.startsWith('http://')) {
