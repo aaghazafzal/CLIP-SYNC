@@ -54,7 +54,8 @@ export function usePeerSync(): UsePeerSyncReturn {
 
     try {
       // Dynamic import to prevent SSR issues with WebRTC
-      const { joinRoom: joinTrysteroRoom } = await import('trystero/torrent');
+      const { joinRoom: joinTrysteroRoom } = await import('@trystero-p2p/torrent');
+
       
       const appId = 'clipsync-zero-setup-v1';
       // Join the Trystero room (using torrent trackers for signaling)
