@@ -1,26 +1,113 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
 @import "tailwindcss";
 
+/* ── Tailwind v4 custom theme ─────────────────────────────── */
+@theme {
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Courier New', monospace;
+
+  /* breakpoints (same as v3 defaults) */
+  --breakpoint-sm:  640px;
+  --breakpoint-md:  768px;
+  --breakpoint-lg:  1024px;
+  --breakpoint-xl:  1280px;
+  --breakpoint-2xl: 1536px;
+}
+
+
+/* ── Custom utilities for Tailwind v4 ─────────────────────── */
+@layer utilities {
+  .mono { font-family: 'JetBrains Mono', 'Courier New', monospace; }
+  .fade-in { animation: fade-in 0.3s ease forwards; }
+  .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  .select-all { user-select: all; }
+  .tracking-widest { letter-spacing: 0.1em; }
+  .font-black { font-weight: 900; }
+  .leading-tight { line-height: 1.15; }
+}
+
+/* ── Theme tokens ─────────────────────────────────────────── */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg:            #F2EFE9;
+  --surface:       #FFFFFF;
+  --surface-2:     #F7F5F1;
+  --border:        #E4DDD3;
+  --border-2:      #D4CEC6;
+  --accent:        #C96A22;
+  --accent-hover:  #B45C1B;
+  --accent-fg:     #FFFFFF;
+  --text:          #1C1916;
+  --text-muted:    #7C766F;
+  --text-faint:    #A8A29B;
+  --connected:     #1F7A46;
+  --connected-bg:  #EBF7F0;
+  --error:         #B93838;
+  --error-bg:      #FDF0F0;
+  --code-bg:       #F0EDE8;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+.dark {
+  --bg:            #111009;
+  --surface:       #1B1814;
+  --surface-2:     #231F1A;
+  --border:        #2C2720;
+  --border-2:      #3A342C;
+  --accent:        #E07B35;
+  --accent-hover:  #EF8A45;
+  --accent-fg:     #FFFFFF;
+  --text:          #EDE8E0;
+  --text-muted:    #8A837A;
+  --text-faint:    #5C5650;
+  --connected:     #3DAA68;
+  --connected-bg:  #0D2318;
+  --error:         #E05A5A;
+  --error-bg:      #1F0E0E;
+  --code-bg:       #231F1A;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* ── Base ─────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, sans-serif;
+  min-height: 100dvh;
+  transition: background-color 0.25s ease, color 0.25s ease;
+  overflow-x: hidden;
+}
+
+/* ── Scrollbar ────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+
+/* ── Selection ────────────────────────────────────────────── */
+::selection { background-color: var(--accent); color: var(--accent-fg); }
+
+/* ── Smooth transitions ───────────────────────────────────── */
+button, input, textarea { transition: all 0.15s ease; }
+
+/* ── Textarea focus ───────────────────────────────────────── */
+textarea:focus {
+  outline: none;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent) !important;
+}
+
+/* ── Keyframes ────────────────────────────────────────────── */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.6; transform: scale(0.85); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
