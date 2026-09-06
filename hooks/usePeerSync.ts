@@ -66,27 +66,27 @@ export function usePeerSync(): UsePeerSyncReturn {
         setStatus('waiting');
       }
 
-      room.onPeerJoin((peerId: string) => {
+      room.onPeerJoin = (peerId: string) => {
         console.log('[ClipSync] 🔗 Peer joined:', peerId);
         setStatus('connected');
-      });
+      };
 
-      room.onPeerLeave((peerId: string) => {
+      room.onPeerLeave = (peerId: string) => {
         console.log('[ClipSync] ⚠️ Peer left:', peerId);
         setStatus('disconnected');
-      });
+      };
 
       // Setup actions
-      const [sendAction, getAction] = room.makeAction('clipboard-text');
-      sendTextFnRef.current = sendAction;
+      const action = room.makeAction('clipboard-text');
+      sendTextFnRef.current = action.send;
 
-      getAction((data: unknown, peerId: string) => {
+      action.onMessage = (data: unknown, context: any) => {
         if (typeof data === 'string') {
           isSending.current = true;
           setText(data);
           setTimeout(() => { isSending.current = false; }, 50);
         }
-      });
+      };
 
       // Timeout for joiner if no one is in the room after 25s
       if (!asHost) {
