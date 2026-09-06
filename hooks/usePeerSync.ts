@@ -114,23 +114,31 @@ export function usePeerSync(): UsePeerSyncReturn {
       const peer = new Peer();
       peerRef.current = peer;
 
-      peer.on('open', () => {
+      peer.on('open', (myId: string) => {
+        console.log('[ClipSync] My peer ID:', myId);
+        console.log('[ClipSync] Connecting to host:', toPeerId(code));
+        
         const conn = peer.connect(toPeerId(code), { reliable: true });
         attachConnHandlers(conn);
 
-        // Timeout if host not found
+        // Timeout if host not found within 25 seconds
         const timer = setTimeout(() => {
           if (connRef.current?.open !== true) {
-            setError('Could not reach the host. Check the code and try again.');
+            setError('Could not reach the host. Make sure the code is correct and the other device is still on the page.');
             setStatus('error');
           }
-        }, 10_000);
+        }, 25_000);
 
         conn.on('open', () => clearTimeout(timer));
+        conn.on('error', () => clearTimeout(timer));
       });
 
       peer.on('error', (err: any) => {
-        setError(err?.message || 'Could not connect');
+        console.error('[ClipSync] Peer error:', err);
+        const msg = err?.type === 'peer-unavailable'
+          ? 'Room not found. Make sure the code is correct and the host is still online.'
+          : err?.message || 'Could not connect. Try again.';
+        setError(msg);
         setStatus('error');
       });
     } catch (err: any) {

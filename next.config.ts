@@ -1,8 +1,12 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // PeerJS is dynamically imported client-side only — no special config needed
   turbopack: {},
+  allowedDevOrigins: [
+    '10.179.156.189',   // local network IP (mobile same WiFi)
+    '*.local',
+    '192.168.*',
+  ],
 };
 
 export default nextConfig;
