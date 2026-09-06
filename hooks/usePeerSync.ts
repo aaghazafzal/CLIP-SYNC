@@ -177,8 +177,8 @@ export function usePeerSync(): UsePeerSyncReturn {
 
     peer.on('open', () => {
       if (!asHost) {
-        // Use serialization: none to enable raw WebRTC ArrayBuffer sending
-        const conn = peer.connect(code.toUpperCase(), { reliable: true, serialization: 'none' });
+        // Remove serialization: 'none' to avoid PeerJS crash. Default msgpack works fine for 64KB chunks.
+        const conn = peer.connect(code.toUpperCase(), { reliable: true });
         setupPeerConnection(conn);
       }
     });
