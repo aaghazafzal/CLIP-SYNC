@@ -154,4 +154,19 @@ wss.on('connection', (ws) => {
 httpServer.listen(PORT, () => {
   console.log(`[ClipSync Relay] Running on port ${PORT}`);
   console.log(`[ClipSync Relay] Health check: http://localhost:${PORT}/health`);
+  
+  // ── Anti-Sleep / Self-Ping (Render Free Tier) ────────
+  // Render spins down free web services after 15 minutes of inactivity.
+  // We ping our own /health endpoint every 10 minutes to stay awake.
+  const RENDER_EXTERNAL_URL = process.env.RENDER_EXTERNAL_URL;
+  if (RENDER_EXTERNAL_URL) {
+    import('https').then((https) => {
+      setInterval(() => {
+        console.log(`[Relay] Self-pinging to prevent sleep...`);
+        https.default.get(`${RENDER_EXTERNAL_URL}/health`).on('error', (err) => {
+          console.error('[Relay] Self-ping failed:', err.message);
+        });
+      }, 10 * 60 * 1000); // Every 10 minutes
+    });
+  }
 });

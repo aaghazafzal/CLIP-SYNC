@@ -27,11 +27,18 @@ interface UsePeerSyncReturn {
 // ── Relay server URL ─────────────────────────────────────
 // In production: your Render.com deployed URL
 // In development: local server
-const RELAY_URL =
+let RELAY_URL =
   process.env.NEXT_PUBLIC_RELAY_URL ||
   (typeof window !== 'undefined' && window.location.hostname === 'localhost'
     ? 'ws://localhost:8080'
     : 'wss://clipsync-relay.onrender.com');
+
+// Ensure the protocol is ws or wss, not http or https
+if (RELAY_URL.startsWith('http://')) {
+  RELAY_URL = RELAY_URL.replace('http://', 'ws://');
+} else if (RELAY_URL.startsWith('https://')) {
+  RELAY_URL = RELAY_URL.replace('https://', 'wss://');
+}
 
 export function usePeerSync(): UsePeerSyncReturn {
   const [text, setText]       = useState('');
